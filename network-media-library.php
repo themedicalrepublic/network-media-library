@@ -19,7 +19,7 @@
  * Description: Network Media Library provides a central media library that's shared across all sites on the Multisite network.
  * Network:     true
  * Plugin URI:  https://github.com/humanmade/network-media-library
- * Version:     1.5.0
+ * Version:     1.5.2
  * Author:      John Blackbourn, Dominik Schilling, Frank Bültge
  * Author URI:  https://github.com/humanmade/network-media-library/graphs/contributors
  * License:     MIT
@@ -578,57 +578,46 @@ class Post_Thumbnail_Saver {
 new Post_Thumbnail_Saver();
 
 
+
 /**
- * A class which handles saving the post's featured image ID when submitted from a REST request.
+ * Filter REST API responses for post saves which include featured_media
+ * field and force the post meta update even if the id doesn't exist on the
+ * current site.
  *
- * This handling is needed because adding a featured image from the Gutenberg editor fires off
- * a REST request to `/wp-json/wp/v2/posts/<id>`, with a request payload containing `featured_media`
- * with the ID of the featured image. A call to `set_post_thumbnail()` validates that the featured
- * image post ID exists, and if the post ID does not exist, `handle_featured_media` returns a WP_Error
- * with a code of `rest_invalid_featured_media`.
+ * @param \WP_HTTP_Response|\WP_Error $response
+ * @param array                       $handler
+ * @param \WP_REST_Request            $request
  *
- * There is a chance that the fetured image on the media site could have a post ID that is not a
- * valid post ID on the site the featured image is being applied to (for example, a post has been
- * deleted). After the post has been submitted via the REST request, the featured image is re-applied
- * to ensure that it is saved with the post.
+ * @return \WP_HTTP_Response|\WP_Error
+ *
+ * @wp-hook rest_request_after_callbacks
  */
-class Post_Thumbnail_Saver_REST {
+function rest_request_after_callbacks( $response, array $handler, \WP_REST_Request $request ) {
+	if ( is_media_site() ) {
+		return $response;
+	}
 
-	/**
-	 * Sets up the necessary action callback if the post is being saved from a REST request.
-	 */
-	public function __construct() {
-		if ( defined( 'REST_REQUEST' )) {
-			add_action( 'pre_post_update', [ $this, 'action_pre_post_update' ], 10, 2 );
+	$featured_image = (int) $request['featured_media'] ?? null;
+
+	if ( $featured_image ) {
+		switch_to_media_site();
+		$attachment = get_post( $featured_image );
+		restore_current_blog();
+
+		$post_id = (int) $request['id'] ?? null;
+
+		if ( $attachment ) {
+			update_post_meta( $post_id, '_thumbnail_id', $featured_image );
+		} else {
+			delete_post_meta( $post_id, '_thumbnail_id' );
 		}
+
+		$data                   = $response->get_data();
+		$data['featured_media'] = $featured_image;
+		$response->set_data( $data );
 	}
 
-	/**
-	 * Hooks into the correct action of `rest_insert_`, based on the post type being saved.
-	 *
-	 * @param int   $post_id Post ID.
-	 * @param array $data    Array of unslashed post data.
-	 */
-	public function action_pre_post_update( int $post_id, array $data ) {
-		add_action( 'rest_insert_' . get_post_type( $post_id ), [ $this, 'action_rest_insert' ], 10, 3 );
-	}
-
-	/**
-	 * Re-saves the featured image ID for the given post.
-	 *
-	 * @param WP_Post         $post     Inserted or updated post object.
-	 * @param WP_REST_Request $request  Request object.
-	 * @param bool            $creating True when creating a post, false when updating.
-	 */
-	public function action_rest_insert( $post, $request, bool $creating ) {
-		$request_json = $request->get_json_params();
-
-		if ( array_key_exists( 'featured_media', $request_json ) ) {
-			update_post_meta( $post->ID, '_thumbnail_id', $request_json[ 'featured_media' ] ); //so the preview works correctly
-			update_post_meta( $post->ID, '_image_to_save', $request_json[ 'featured_media' ] );
-		}
-		
-	}
+	return $response;
 }
 
-new Post_Thumbnail_Saver_REST();
+add_filter( 'rest_request_after_callbacks', __NAMESPACE__ . '\\rest_request_after_callbacks', 10, 3 );
